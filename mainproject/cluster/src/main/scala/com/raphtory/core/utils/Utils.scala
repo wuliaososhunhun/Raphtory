@@ -52,6 +52,7 @@ object Utils {
 
   def getPartition(ID:Int, managerCount : Int):Int = ID % managerCount //get the partition a vertex is stored in
   def checkDst(dstID:Int, managerCount:Int, managerID:Int):Boolean = (dstID % managerCount) == managerID //check if destination is also local
+  def getManagerUri(partitionManagerId: Int) : String = s"/user/Manager_$partitionManagerId"
   def getManager(srcId:Int, managerCount : Int):String = s"/user/Manager_${srcId % managerCount}" //simple srcID hash at the moment
     /**
     * Shifter to get only one Long as Edges indexing
