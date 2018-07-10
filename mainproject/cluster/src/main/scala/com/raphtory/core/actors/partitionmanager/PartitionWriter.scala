@@ -75,8 +75,9 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
         }
       })
   }
-  def applyRequest[A, B](entityId : Long, callback : => Task[Fiber[B]], onComplete : () => Unit, toBeForwarded : EmptyRaphCaseClass) = {
-    while(locMapSemaphore.contains(entityId)){
+
+  def applyRequestInnerThread[A, B](entityId : Long, callback : => Task[Fiber[B]], onComplete : () => Unit, toBeForwarded : EmptyRaphCaseClass) = {
+    while (locMapSemaphore.contains(entityId)) {
       Thread.sleep(100) // TODO Look at performance without sleeping
     }
 
@@ -84,13 +85,17 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
       case None => callback.runAsync(s)
       case Some(partitionManager) => {
         mediator ! DistributedPubSubMediator.Send(Utils.getManagerUri(partitionManager), toBeForwarded, false)
-        migrationJobs.put(entityId, applyPartitioningStrategy(entityId))
+        migrationJobs.put(entityId, () => applyPartitioningStrategy(entityId))
         if (migrationJobs.size > migrationThreshold) {
           Task.eval(executeMigrationJobs).fork.runAsync(s)
         }
       }
     }
   }
+
+  def applyRequest[A, B](entityId : Long, callback : => Task[Fiber[B]], onComplete : () => Unit, toBeForwarded : EmptyRaphCaseClass) =
+    Task.eval(applyRequestInnerThread(entityId, callback, onComplete, toBeForwarded)).fork.runAsync
+
 
   //implicit val s : Scheduler = Scheduler(ExecutionModel.BatchedExecution(1024))
 
@@ -118,28 +123,61 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
   }
 
   override def receive : Receive = {
-    case "tick"       => reportIntake()
-    case "profile"    => profile()
-    case "keep_alive" => keepAlive()
-    case "stdoutReport"=> Task.eval(reportStdout()).fork.runAsync
+    case "tick"         => reportIntake()
+    case "profile"      => profile()
+    case "keep_alive"   => keepAlive()
+    case "stdoutReport" => Task.eval(reportStdout()).fork.runAsync
 
     //case LiveAnalysis(name,analyser) => mediator ! DistributedPubSubMediator.Send(name, Results(analyser.analyse(vertices,edges)), false)
 
-    case VertexAdd(msgTime,srcId)                                => Task.eval(applyRequest(srcId, Task.eval(storage.vertexAdd(msgTime,srcId)).fork,() => vHandle(srcId), VertexAdd(msgTime,srcId))).fork.runAsync
-    case VertexRemoval(msgTime,srcId) => Task.eval(applyRequest(srcId, Task.eval(storage.vertexRemoval(msgTime,srcId)).fork, () => vHandle(srcId), VertexRemoval(msgTime,srcId))).fork.runAsync
+    case VertexAdd(msgTime,srcId)     =>
+      applyRequest(srcId, Task.eval(storage.vertexAdd(msgTime,srcId)).fork,() => vHandle(srcId), VertexAdd(msgTime,srcId))
 
-    case VertexAddWithProperties(msgTime,srcId,properties) => Task.eval(applyRequest(srcId, Task.eval(storage.vertexAdd(msgTime,srcId,properties)).fork,() => vHandle(srcId),VertexAddWithProperties(msgTime,srcId,properties))).fork.runAsync
-    case EdgeAdd(msgTime,srcId,dstId) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId,dstId), Task.eval(storage.edgeAdd(msgTime,srcId,dstId)).fork,() => eHandle(srcId,dstId),EdgeAdd(msgTime,srcId,dstId))).fork.runAsync
-    case RemoteEdgeAdd(msgTime,srcId,dstId,properties) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId,dstId), Task.eval(storage.remoteEdgeAdd(msgTime,srcId,dstId,properties)).fork,() => eHandleSecondary(srcId,dstId),RemoteEdgeAdd(msgTime,srcId,dstId,properties))).fork.runAsync
-    case RemoteEdgeAddNew(msgTime,srcId,dstId,properties,deaths) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.remoteEdgeAddNew(msgTime,srcId,dstId,properties,deaths)).fork,() => eHandleSecondary(srcId,dstId), RemoteEdgeAddNew(msgTime,srcId,dstId,properties,deaths))).fork.runAsync
-    case EdgeAddWithProperties(msgTime,srcId,dstId,properties) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.edgeAdd(msgTime,srcId,dstId,properties)).fork,() => eHandle(srcId,dstId),EdgeAddWithProperties(msgTime,srcId,dstId,properties))).fork.runAsync
+    case VertexRemoval(msgTime,srcId) =>
+      applyRequest(srcId, Task.eval(storage.vertexRemoval(msgTime,srcId)).fork,
+        () => vHandle(srcId), VertexRemoval(msgTime,srcId))
 
-    case EdgeRemoval(msgTime,srcId,dstId) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.edgeRemoval(msgTime,srcId,dstId)).fork,() => eHandle(srcId,dstId),EdgeRemoval(msgTime,srcId,dstId))).fork.runAsync
-    case RemoteEdgeRemoval(msgTime,srcId,dstId) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.remoteEdgeRemoval(msgTime,srcId,dstId)).fork,() => eHandleSecondary(srcId,dstId),RemoteEdgeRemoval(msgTime,srcId,dstId))).fork.runAsync
-    case RemoteEdgeRemovalNew(msgTime,srcId,dstId,deaths) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.remoteEdgeRemovalNew(msgTime,srcId,dstId,deaths)).fork,() => eHandleSecondary(srcId,dstId),RemoteEdgeRemovalNew(msgTime,srcId,dstId,deaths))).fork.runAsync
+    case VertexAddWithProperties(msgTime,srcId,properties) =>
+      applyRequest(srcId, Task.eval(storage.vertexAdd(msgTime,srcId,properties)).fork,
+        () => vHandle(srcId),VertexAddWithProperties(msgTime,srcId,properties))
 
-    case ReturnEdgeRemoval(msgTime,srcId,dstId) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.returnEdgeRemoval(msgTime,srcId,dstId)).fork,() => eHandleSecondary(srcId,dstId),ReturnEdgeRemoval(msgTime,srcId,dstId))).fork.runAsync
-    case RemoteReturnDeaths(msgTime,srcId,dstId,deaths) => Task.eval(applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.remoteReturnDeaths(msgTime,srcId,dstId,deaths)).fork,() => eHandleSecondary(srcId,dstId),RemoteReturnDeaths(msgTime,srcId,dstId,deaths))).fork.runAsync
+    case EdgeAdd(msgTime,srcId,dstId) =>
+      applyRequest(Utils.getEdgeIndex(srcId,dstId), Task.eval(storage.edgeAdd(msgTime,srcId,dstId)).fork,
+        () => eHandle(srcId,dstId),EdgeAdd(msgTime,srcId,dstId))
+
+    case RemoteEdgeAdd(msgTime,srcId,dstId,properties) =>
+      applyRequest(Utils.getEdgeIndex(srcId,dstId),
+        Task.eval(storage.remoteEdgeAdd(msgTime,srcId,dstId,properties)).fork,() => eHandleSecondary(srcId,dstId),
+        RemoteEdgeAdd(msgTime,srcId,dstId,properties))
+
+    case RemoteEdgeAddNew(msgTime,srcId,dstId,properties,deaths) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId),
+        Task.eval(storage.remoteEdgeAddNew(msgTime,srcId,dstId,properties,deaths)).fork,
+        () => eHandleSecondary(srcId,dstId), RemoteEdgeAddNew(msgTime,srcId,dstId,properties,deaths))
+
+    case EdgeAddWithProperties(msgTime,srcId,dstId,properties) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId),
+        Task.eval(storage.edgeAdd(msgTime,srcId,dstId,properties)).fork,() => eHandle(srcId,dstId),EdgeAddWithProperties(msgTime,srcId,dstId,properties))
+
+    case EdgeRemoval(msgTime,srcId,dstId) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.edgeRemoval(msgTime,srcId,dstId)).fork,() => eHandle(srcId,dstId),EdgeRemoval(msgTime,srcId,dstId))
+
+    case RemoteEdgeRemoval(msgTime,srcId,dstId) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId),
+        Task.eval(storage.remoteEdgeRemoval(msgTime,srcId,dstId)).fork,
+        () => eHandleSecondary(srcId,dstId), RemoteEdgeRemoval(msgTime,srcId,dstId))
+    case RemoteEdgeRemovalNew(msgTime,srcId,dstId,deaths) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId),
+        Task.eval(storage.remoteEdgeRemovalNew(msgTime,srcId,dstId,deaths)).fork,() =>
+          eHandleSecondary(srcId,dstId),RemoteEdgeRemovalNew(msgTime,srcId,dstId,deaths))
+
+    case ReturnEdgeRemoval(msgTime,srcId,dstId) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.returnEdgeRemoval(msgTime,srcId,dstId)).fork,
+        () => eHandleSecondary(srcId,dstId),ReturnEdgeRemoval(msgTime,srcId,dstId))
+
+    case RemoteReturnDeaths(msgTime,srcId,dstId,deaths) =>
+      applyRequest(Utils.getEdgeIndex(srcId, dstId), Task.eval(storage.remoteReturnDeaths(msgTime,srcId,dstId,deaths)).fork,
+        () => eHandleSecondary(srcId,dstId),RemoteReturnDeaths(msgTime,srcId,dstId,deaths))
 
     case v : Vertex => {
       storage.vertices.put(v.getId.toInt, v)
@@ -153,7 +191,10 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
       storage.setManagerCount(managerCount)
     }
 
-    case EdgeUpdateProperty(msgTime, edgeId, key, value)        => Task.eval(applyRequest(edgeId, Task.eval(storage.updateEdgeProperties(msgTime, edgeId, key, value)).fork, () => {}, EdgeUpdateProperty(msgTime, edgeId, key, value))).fork.runAsync
+    case EdgeUpdateProperty(msgTime, edgeId, key, value)        =>
+      applyRequest(edgeId, Task.eval(storage.updateEdgeProperties(msgTime, edgeId, key, value)).fork,
+        () => {}, EdgeUpdateProperty(msgTime, edgeId, key, value))
+
     case e => println(s"Not handled message ${e.getClass} ${e.toString}")
  }
 
