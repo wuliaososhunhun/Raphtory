@@ -4,6 +4,7 @@ import com.raphtory.core.analysis.Analyser
 import com.raphtory.core.utils.CommandEnum
 
 import scala.collection.mutable
+import com.raphtory.core.model.graphentities.RemotePos
 
 /**
   * Created by Mirate on 30/05/2017.
@@ -61,5 +62,7 @@ case class NextStep(analyzer : Analyser) extends RaphReadClasses
 case class EndStep(results : Any) extends RaphReadClasses // TODO Define results
 case class GetNetworkSize() extends RaphReadClasses
 case class NetworkSize(size : Int) extends RaphReadClasses
+
+case class UpdateEdgeLocation(edgeId : Long, remotePos: RemotePos.Value, remotePM : Int)
 //case class WatchDogIp(ip: String)
 

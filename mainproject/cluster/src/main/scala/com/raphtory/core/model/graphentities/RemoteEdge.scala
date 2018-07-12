@@ -41,6 +41,6 @@ case class RemoteEdge(msgTime: Long,
                       dstId: Int,
                       initialValue: Boolean,
                       addOnly:Boolean,
-                      remotePos: RemotePos.Value,
-                      remotePartitionID: Int)
+                      var remotePos: RemotePos.Value,
+                      var remotePartitionID: Int)
     extends Edge(msgTime, srcId, dstId, initialValue, addOnly)

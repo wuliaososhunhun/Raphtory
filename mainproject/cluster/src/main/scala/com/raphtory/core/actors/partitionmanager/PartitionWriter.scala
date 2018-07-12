@@ -5,10 +5,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import akka.actor.ActorRef
 import akka.cluster.pubsub.{DistributedPubSub, DistributedPubSubMediator}
 import com.raphtory.core.storage.EntitiesStorage
-import com.raphtory.core.model.graphentities.Vertex
+import com.raphtory.core.model.graphentities._
 import com.raphtory.core.model.communication._
 import com.raphtory.core.actors.RaphtoryActor
-import com.raphtory.core.model.graphentities.Entity
 import com.raphtory.core.utils.Utils
 import kamon.Kamon
 import kamon.metric.GaugeMetric
@@ -62,16 +61,29 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
       val entityId = el._1
       val callback = el._2
       val managerId = applyPartitioningStrategy(entityId)
+      var v : Vertex = null
       if (managerId != this.managerID) {
         locMap.remove(entityId) // Remove the element from the locMap if present (in the case this partitionManager isn't the one corresponding to the hash strategy
         locMapSemaphore.+(entityId)
           // migrate vertex and associatedEdges
-          val v = storage.vertices.remove(entityId.toInt).get
+          v = storage.vertices.remove(entityId.toInt).get
           mediator ! DistributedPubSubMediator.Send(Utils.getManagerUri(managerId), v, false)
-          v.associatedEdges.foreach(e => {
-            storage.edges.remove(e.getId)
-          })
         locMapSemaphore.-(entityId)
+        v.associatedEdges.filter(e => !e.isInstanceOf[RemoteEdge]).foreach(e => {
+          // local edges have to be kept and updated to remote edges with the proper destination
+          if (e.getSrcId == v.getId) {
+            val re = RemoteEdge(e.creationTime, e.getId, e.previousState, e.properties, RemotePos.Destination, managerId)
+            storage.edges.synchronized {
+              storage.edges.remove(e.getId)
+              storage.edges.put(e.getId, re)
+              val otherSideVertex = storage.vertices.get(e.getDstId).get
+              otherSideVertex.associatedEdges.-(e)
+              otherSideVertex.associatedEdges.+(re)
+            }
+          }
+        })
+        // remote edges have to be dropped (just this end was located in the current PM, so they have not to stay here)
+        v.associatedEdges.filter(e => e.isInstanceOf[RemoteEdge]).foreach(e => storage.edges.remove(e.getId))
         }
       })
   }
@@ -182,19 +194,67 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
     case v : Vertex => {
       storage.vertices.put(v.getId.toInt, v)
       v.associatedEdges.foreach(e => {
+        if (storage.edges.contains(e.getId)) { // edge has become local
+          val oldEdge = storage.edges.get(e.getId).get
+          val newLocalEdge = Edge(e.creationTime, e.getId, e.previousState, e.properties)
+          v.associatedEdges.-(e)
+          v.associatedEdges.+(newLocalEdge)
+          storage.edges.put(newLocalEdge.getId, newLocalEdge)
+          var otherSideVertex : Vertex = null
+          if (newLocalEdge.getSrcId == v.getId) {
+            // v is the source and edge is now local
+            otherSideVertex = storage.vertices.get(newLocalEdge.getDstId).get
+          } else {
+            // v is the destination and edge is now local
+            otherSideVertex = storage.vertices.get(newLocalEdge.getDstId).get
+          }
+          // Edge is now local, updating otherSide vertex
+          otherSideVertex.associatedEdges.-(oldEdge)
+          otherSideVertex.associatedEdges.+(newLocalEdge)
+
+        } else { // edge is (or has become) remote
+          if (e.isInstanceOf[RemoteEdge]) { // It was Remote
+            if (e.getSrcId == v.getId) { // v is the source vertex, destination remains the same, need update on destination vertex
+
+              // send message to destination to update with this partitionManager id the source remote position on the ghost edge
+              mediator ! DistributedPubSubMediator.Send(Utils.getManagerUri(e.asInstanceOf[RemoteEdge].remotePartitionID), UpdateEdgeLocation(e.getId, RemotePos.Source, managerID), false)
+            } else { // v is the destination vertex
+              // send message to source to update with this partitionManager id the destination remote position on the main edge
+              mediator ! DistributedPubSubMediator.Send(Utils.getManagerUri(e.asInstanceOf[RemoteEdge].remotePartitionID), UpdateEdgeLocation(e.getId, RemotePos.Destination, managerID), false)
+
+            }
+
+          } else { // It was local
+            // create a new remote edge to be stored in this partition manager, the other side was converted before during the vertex migration process
+            var newEdge : RemoteEdge = null
+            if (e.getSrcId == v.getId) { // This is the main edge
+              newEdge = RemoteEdge(e.creationTime, e.getId, e.previousState, e.properties,
+                RemotePos.Destination, sender().path.toStringWithoutAddress.replaceFirst("^.*Manager_", "").toInt)
+            } else { // This is the ghost-copy edge
+               newEdge = RemoteEdge(e.creationTime, e.getId, e.previousState, e.properties,
+                RemotePos.Source, sender().path.toStringWithoutAddress.replaceFirst("^.*Manager_", "").toInt)
+            }
+            v.associatedEdges.-(e)
+            v.associatedEdges.+(newEdge)
+            storage.edges.put(newEdge.getId, newEdge)
+          }
+        }
         storage.edges.put(e.getId, e)
       })
     }
+
+    case UpdateEdgeLocation(edgeId, remotePos, remotePM) =>
+      val e = storage.edges.get(edgeId).get.asInstanceOf[RemoteEdge]
+      e.remotePartitionID = remotePM
+      e.remotePos = remotePos
 
     case UpdatedCounter(newValue) => {
       managerCount = newValue
       storage.setManagerCount(managerCount)
     }
-
     case EdgeUpdateProperty(msgTime, edgeId, key, value)        =>
       applyRequest(edgeId, Task.eval(storage.updateEdgeProperties(msgTime, edgeId, key, value)).fork,
         () => {}, EdgeUpdateProperty(msgTime, edgeId, key, value))
-
     case e => println(s"Not handled message ${e.getClass} ${e.toString}")
  }
 

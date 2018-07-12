@@ -50,9 +50,6 @@ class Property(creationTime: Long,
     (safeHistory,oldHistory)
   }
 
-
-
-
   /** *
     * returns a string with all the history of that property
     *
