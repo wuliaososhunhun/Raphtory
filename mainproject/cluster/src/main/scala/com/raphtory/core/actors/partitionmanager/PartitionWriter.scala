@@ -4,6 +4,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import akka.actor.ActorRef
 import akka.cluster.pubsub.{DistributedPubSub, DistributedPubSubMediator}
+import akka.pattern.ask
 import com.raphtory.core.storage.EntitiesStorage
 import com.raphtory.core.model.graphentities._
 import com.raphtory.core.model.communication._
@@ -17,7 +18,9 @@ import monix.execution.Scheduler
 
 import scala.collection.parallel.ParSet
 import scala.collection.parallel.mutable.ParTrieMap
+import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.util.{Failure, Success, Try}
 /**
   * The graph partition manages a set of vertices and there edges
   * Is sent commands which have been processed by the command Processor
@@ -61,14 +64,42 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
       val entityId = el._1
       val callback = el._2
       val managerId = applyPartitioningStrategy(entityId)
+      val hashingManagerID = Utils.getPartition(entityId.toInt, managerCount)
+
+      implicit val timeout = akka.util.Timeout(FiniteDuration(10, SECONDS))
       var v : Vertex = null
+
       if (managerId != this.managerID) {
         locMap.remove(entityId) // Remove the element from the locMap if present (in the case this partitionManager isn't the one corresponding to the hash strategy
-        locMapSemaphore.+(entityId)
+        if (this.managerID != hashingManagerID) {
+          // This is a migration for an already migrated vertex
+          val x = mediator ? DistributedPubSubMediator.Send(Utils.getManagerUri(hashingManagerID), LocLock(entityId), false)
+          Await.ready(x, Duration.Inf).value.get match {
+            case Success(t) =>
+              t match {
+                case LocLockAck =>
+                case _ => {
+                  println("ERROR ON DISTRIBUTED LOCK")
+                  throw new Exception()
+                }
+              }
+            case Failure(e) =>
+              println("FAILURE ON DISTRIBUTED LOCK")
+              throw new Exception()
+          }
+
+        } else {
+          locMapSemaphore.+(entityId)
+        }
           // migrate vertex and associatedEdges
           v = storage.vertices.remove(entityId.toInt).get
           mediator ! DistributedPubSubMediator.Send(Utils.getManagerUri(managerId), v, false)
-        locMapSemaphore.-(entityId)
+        if (this.managerID != hashingManagerID) {
+          // This is a migration for an already migrated vertex
+          mediator ? DistributedPubSubMediator.Send(Utils.getManagerUri(hashingManagerID), LocUnLock(entityId), false)
+        } else {
+          locMapSemaphore.-(entityId)
+        }
         v.associatedEdges.filter(e => !e.isInstanceOf[RemoteEdge]).foreach(e => {
           // local edges have to be kept and updated to remote edges with the proper destination
           if (e.getSrcId == v.getId) {

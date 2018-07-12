@@ -64,5 +64,8 @@ case class GetNetworkSize() extends RaphReadClasses
 case class NetworkSize(size : Int) extends RaphReadClasses
 
 case class UpdateEdgeLocation(edgeId : Long, remotePos: RemotePos.Value, remotePM : Int)
+case class LocLock(entityId : Long)
+case class LocUnLock(entityId : Long)
+case class LocLockAck(entityId : Long)
 //case class WatchDogIp(ip: String)
 
