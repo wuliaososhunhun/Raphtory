@@ -9,7 +9,9 @@ import com.raphtory.core.storage.EntitiesStorage
 import com.raphtory.core.model.graphentities._
 import com.raphtory.core.model.communication._
 import com.raphtory.core.actors.RaphtoryActor
+import com.raphtory.core.model.PartitioningTrait
 import com.raphtory.core.utils.Utils
+import com.raphtory.examples.partitioning.LinearGreedy
 import kamon.Kamon
 import kamon.metric.GaugeMetric
 import monix.eval.{Fiber, Task}
@@ -41,7 +43,7 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
   val mediator : ActorRef   = DistributedPubSub(context.system).mediator // get the mediator for sending cluster messages
 
   mediator ! DistributedPubSubMediator.Subscribe(Utils.partitionsSizeTopic, self)
-  val storage = EntitiesStorage.apply(printing, managerCount, managerID, mediator)
+  implicit val storage = EntitiesStorage.apply(printing, managerCount, managerID, mediator)
 
   mediator ! DistributedPubSubMediator.Put(self)
 
@@ -51,45 +53,17 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
   final val locMap = ParTrieMap[Long, Int]()
   final val locMapSemaphore = ParSet[Long]()
   final val migrationJobs = ParTrieMap[Long, Unit]()
-  final val partSizeMap   = ParTrieMap[Int, Long]()
-  final val C = Math.pow(2, 10) // TODO define maximum capacity for a partition manager
-
+  final implicit val partSizeMap   = ParTrieMap[Int, Long]()
+  final val C = Math.pow(2, 10) // TODO define maximum capacity for a partition manager (see also LineareGreedy.scala example, this val isn't currently used by any PartitioningTrait implementation; note that the PartitioningTrait itself can't access this field
   val migrationThreshold = 1024  // TODO get the threshold dynamically managed
-
-  def w(i : Int) = 1 - partSizeMap.get(i).get / C
-
-  def applyPartitioningStrategy(entityId : Long) : Int = {
-    // Compute the best partitionManager to be in charge of the local entity entityId and return the managerId to which the entity has to be migrated
-    var max : Double = 0
-    var nextPartition : Int = -1
-    (0 to managerCount).foreach(i => {
-      if (i != managerID) {
-        storage.vertices.get(entityId.toInt) match {
-          case Some(v) =>
-            val weight =
-              v.associatedEdges
-              .filter(e =>
-                e.isInstanceOf[RemoteEdge] && e.asInstanceOf[RemoteEdge].remotePartitionID == i)
-              .size * w(i)
-
-            // the filter get the set made by the intersection of the set of vertices stored in partition $i and the v's neighbors stored in the same partition
-
-            if (weight > max) {
-              max = weight
-              nextPartition = i
-            }
-          case None =>
-        }
-      }
-    })
-    nextPartition
-  }
+  val partStrategyName    = s"${sys.env.getOrElse("PARTITIONINGCLASS", classOf[LinearGreedy].getClass.getName)}"
+  val partitioner : PartitioningTrait = Class.forName(partStrategyName).newInstance().asInstanceOf[PartitioningTrait]
 
   def executeMigrationJobs = {
     migrationJobs.foreach(el => {
       val entityId = el._1
       val callback = el._2
-      val managerId = applyPartitioningStrategy(entityId)
+      val managerId = partitioner.applyPartitioning(entityId, managerCount, managerID)
       val hashingManagerID = Utils.getPartition(entityId.toInt, managerCount)
 
       implicit val timeout = akka.util.Timeout(FiniteDuration(10, SECONDS))
@@ -155,7 +129,7 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
       case None => callback.runAsync(s)
       case Some(partitionManager) => {
         mediator ! DistributedPubSubMediator.Send(Utils.getManagerUri(partitionManager), toBeForwarded, false)
-        migrationJobs.put(entityId, () => applyPartitioningStrategy(entityId))
+        migrationJobs.put(entityId, () => partitioner.applyPartitioning(entityId, managerCount, managerID))
         if (migrationJobs.size > migrationThreshold) {
           Task.eval(executeMigrationJobs).fork.runAsync(s)
         }
