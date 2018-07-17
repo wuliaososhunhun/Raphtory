@@ -40,6 +40,7 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
 
   val mediator : ActorRef   = DistributedPubSub(context.system).mediator // get the mediator for sending cluster messages
 
+  mediator ! DistributedPubSubMediator.Subscribe(Utils.partitionsSizeTopic, self)
   val storage = EntitiesStorage.apply(printing, managerCount, managerID, mediator)
 
   mediator ! DistributedPubSubMediator.Put(self)
@@ -50,13 +51,38 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
   final val locMap = ParTrieMap[Long, Int]()
   final val locMapSemaphore = ParSet[Long]()
   final val migrationJobs = ParTrieMap[Long, Unit]()
+  final val partSizeMap   = ParTrieMap[Int, Long]()
+  final val C = Math.pow(2, 10) // TODO define maximum capacity for a partition manager
 
-  // TODO get the threshold dynamically managed
-  val migrationThreshold = 1024
+  val migrationThreshold = 1024  // TODO get the threshold dynamically managed
+
+  def w(i : Int) = 1 - partSizeMap.get(i).get / C
 
   def applyPartitioningStrategy(entityId : Long) : Int = {
     // Compute the best partitionManager to be in charge of the local entity entityId and return the managerId to which the entity has to be migrated
-    0
+    var max : Double = 0
+    var nextPartition : Int = -1
+    (0 to managerCount).foreach(i => {
+      if (i != managerID) {
+        storage.vertices.get(entityId.toInt) match {
+          case Some(v) =>
+            val weight =
+              v.associatedEdges
+              .filter(e =>
+                e.isInstanceOf[RemoteEdge] && e.asInstanceOf[RemoteEdge].remotePartitionID == i)
+              .size * w(i)
+
+            // the filter get the set made by the intersection of the set of vertices stored in partition $i and the v's neighbors stored in the same partition
+
+            if (weight > max) {
+              max = weight
+              nextPartition = i
+            }
+          case None =>
+        }
+      }
+    })
+    nextPartition
   }
 
   def executeMigrationJobs = {
@@ -69,7 +95,7 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
       implicit val timeout = akka.util.Timeout(FiniteDuration(10, SECONDS))
       var v : Vertex = null
 
-      if (managerId != this.managerID) {
+      if (managerId > -1 && managerId != this.managerID) {
         locMap.remove(entityId) // Remove the element from the locMap if present (in the case this partitionManager isn't the one corresponding to the hash strategy
         if (this.managerID != hashingManagerID) {
           // This is a migration for an already migrated vertex
@@ -115,8 +141,9 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
         })
         // remote edges have to be dropped (just this end was located in the current PM, so they have not to stay here)
         v.associatedEdges.filter(e => e.isInstanceOf[RemoteEdge]).foreach(e => storage.edges.remove(e.getId))
-        }
-      })
+
+      }
+    })
   }
 
   def applyRequestInnerThread[A, B](entityId : Long, callback : => Task[Fiber[B]], onComplete : () => Unit, toBeForwarded : EmptyRaphCaseClass) = {
@@ -163,12 +190,15 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
         Duration(1, MINUTES), self, "stdoutReport")
     context.system.scheduler.schedule(Duration(8, SECONDS),
       Duration(10, SECONDS), self, "keep_alive")
+    context.system.scheduler.schedule(Duration(8, SECONDS),
+      Duration(10, SECONDS), self, "publish_size")
   }
 
   override def receive : Receive = {
     case "tick"         => reportIntake()
     case "profile"      => profile()
     case "keep_alive"   => keepAlive()
+    case "publish_size" => pubPartSize()
     case "stdoutReport" => Task.eval(reportStdout()).fork.runAsync
 
     //case LiveAnalysis(name,analyser) => mediator ! DistributedPubSubMediator.Send(name, Results(analyser.analyse(vertices,edges)), false)
@@ -286,10 +316,12 @@ class PartitionWriter(id : Int, test : Boolean, managerCountVal : Int) extends R
     case EdgeUpdateProperty(msgTime, edgeId, key, value)        =>
       applyRequest(edgeId, Task.eval(storage.updateEdgeProperties(msgTime, edgeId, key, value)).fork,
         () => {}, EdgeUpdateProperty(msgTime, edgeId, key, value))
+    case PartitionSize(partId, size) => partSizeMap.put(partId, size)
     case e => println(s"Not handled message ${e.getClass} ${e.toString}")
  }
 
   def keepAlive() : Unit = mediator ! DistributedPubSubMediator.Send("/user/WatchDog", PartitionUp(managerID), localAffinity = false)
+  def pubPartSize() : Unit = mediator ! DistributedPubSubMediator.Publish(Utils.partitionsSizeTopic, PartitionSize(managerID, storage.vertices.size))
 
   /*****************************
    * Metrics reporting methods *

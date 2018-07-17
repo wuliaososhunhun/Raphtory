@@ -67,5 +67,6 @@ case class UpdateEdgeLocation(edgeId : Long, remotePos: RemotePos.Value, remoteP
 case class LocLock(entityId : Long)
 case class LocUnLock(entityId : Long)
 case class LocLockAck(entityId : Long)
+case class PartitionSize(partId : Int, size : Long)
 //case class WatchDogIp(ip: String)
 

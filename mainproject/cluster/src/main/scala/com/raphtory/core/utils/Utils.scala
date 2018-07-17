@@ -10,6 +10,7 @@ object Utils {
   val clusterSystemName = "dockerexp"
   val config            = ConfigFactory.load
   val partitionsTopic   = "/partitionsCount"
+  val partitionsSizeTopic   = "/partitionsSize"
   val readersTopic      = "/readers"
   val liveAnalysisTopic      = "/liveanalysis"
 
