@@ -71,7 +71,7 @@ class RaphtoryReplicator(actorType:String, initialManagerCount:Int, routerName :
 
         actorRef = context.system.actorOf(Props(new PartitionWriter(myId, false, currentCount)), s"Manager_$myId")
         actorRefReader = context.system.actorOf(Props(new PartitionReader(myId, false, currentCount)), s"ManagerReader_$myId")
-        context.system.actorOf(Props(new Archivist(0.3)))
+        context.system.actorOf(Props(new Archivist(0.7)))
       }
 
       case "Router" => {

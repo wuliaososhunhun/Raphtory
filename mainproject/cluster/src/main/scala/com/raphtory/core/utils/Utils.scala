@@ -1,9 +1,12 @@
 package com.raphtory.core.utils
 
+import java.text.SimpleDateFormat
+
 import akka.actor.ActorContext
 import com.raphtory.core.model.graphentities.{Edge, RemoteEdge, RemotePos}
 import com.typesafe.config.ConfigFactory
 import org.apache.commons.lang.StringEscapeUtils
+
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable
 
@@ -19,17 +22,6 @@ object Utils {
     context.actorSelection(s"akka.tcp://$ip:${config.getString("settings.bport")}/user/WatchDog")
   }
 
-  /**
-    *
-    * @param msgId
-    * @param srcId
-    * @param dstId
-    * @param managerCount
-    * @param managerId
-    * @param edges
-    * @return (Edge, Local, Present)
-    */
-
   def getPartition(ID:Int, managerCount : Int):Int = {
     (ID % (managerCount *10)) /10
   }
@@ -43,7 +35,7 @@ object Utils {
     val mod = srcId % (managerCount *10)
     val manager = mod /10
     val worker = mod % 10
-    s"/user/Manager_${manager}_child_$worker"
+    s"/user/Manager_${manager}/child_$worker"
   } //simple srcID hash at the moment
     /**
     * Shifter to get only one Long as Edges indexing
@@ -95,4 +87,7 @@ object Utils {
     }
     s.dropRight(2) + "}"
   }
+
+  def nowTimeStamp()= new SimpleDateFormat("dd-MM hh:mm:ss").format(System.currentTimeMillis())
+  def unixToTimeStamp(unixTime:Long) = new SimpleDateFormat("dd-MM hh:mm:ss").format(unixTime)
 }
